@@ -61,17 +61,19 @@ void server(const int port, const char *save_dir){
             save_dir[strlen(save_dir) - 1] == '/' ? "":"/", filename);
 
         FILE *fp = fopen(path, "wb");
+        if (fp != NULL) lockf(fileno(fp), F_TLOCK, 0);
         snprintf(buffer, sizeof(buffer), "%d", errno);
         write(connfd, buffer, strlen(buffer) + 1);
-        if (fp != NULL) {
+        if (errno == 0) {
             int count;
             while((count = read(connfd, buffer, sizeof(buffer))) > 0) {
                 fwrite(buffer, sizeof(char), count, fp);
                 snprintf(buffer, sizeof(buffer), "%d", ferror(fp) == 0 ? errno : EIO);
                 write(connfd, buffer, strlen(buffer) + 1);
             }
-            fclose(fp);
+            lockf(fileno(fp), F_ULOCK, 0);
         }
+        if (fp != NULL) fclose(fp);
         close(connfd);
     }
 
