@@ -9,7 +9,6 @@
 #include <netinet/ip.h>
 #include <errno.h>
 #include <sys/stat.h>
-#include <math.h>
 
 #define MAX_NAME_LENGHT 256
 
