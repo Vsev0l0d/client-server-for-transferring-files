@@ -9,11 +9,50 @@
 #include <netinet/ip.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <pthread.h>
+#include <netdb.h>
+#include <sys/file.h>
 
 #define MAX_NAME_LENGHT 256
+#define BUFFER_SIZE 4096
 
 struct sockaddr_in serv_addr;
-char buffer[4096];
+
+typedef struct {
+    int connfd;
+    const char *save_dir;
+} pthrData;
+
+void* server_thread(void* thread_data){
+    pthrData *data = (pthrData*) thread_data;
+    int connfd = data->connfd;
+
+    char buffer[BUFFER_SIZE];
+
+    char filename[MAX_NAME_LENGHT];
+    read(connfd, filename, sizeof(filename));
+    char path[MAX_NAME_LENGHT*2 + 1];
+    snprintf(path, sizeof(path), "%s%s%s", data->save_dir, 
+        data->save_dir[strlen(data->save_dir) - 1] == '/' ? "":"/", filename);
+
+    FILE *fp = fopen(path, "wb");
+    if (fp != NULL) flock(fileno(fp), LOCK_EX|LOCK_NB);
+    snprintf(buffer, sizeof(buffer), "%d", errno);
+    write(connfd, buffer, strlen(buffer) + 1);
+
+    if (errno == 0) {
+        int count;
+        while((count = read(connfd, buffer, sizeof(buffer))) > 0) {
+            fwrite(buffer, sizeof(char), count, fp);
+            snprintf(buffer, sizeof(buffer), "%d", ferror(fp) == 0 ? errno : EIO);
+            write(connfd, buffer, strlen(buffer) + 1);
+        }
+        flock(fileno(fp), LOCK_UN);
+    }
+    if (fp != NULL) fclose(fp);
+    close(connfd);
+    pthread_exit(0);
+}
 
 void server(const int port, const char *save_dir){
     printf("start server: port=%d, save_dir=%s\n", port, save_dir);
@@ -28,7 +67,7 @@ void server(const int port, const char *save_dir){
         exit(EXIT_FAILURE);
     }
 
-    int listenfd = socket(AF_INET, SOCK_STREAM, 0);
+    const int listenfd = socket(AF_INET, SOCK_STREAM, 0);
     if (listenfd < 0) {
         perror("Could not create socket");
         exit(EXIT_FAILURE);
@@ -51,30 +90,18 @@ void server(const int port, const char *save_dir){
         int connfd = accept(listenfd, (struct sockaddr*)NULL, NULL);
         if (connfd < 0) {
             perror("Accept Failed");
-            exit(EXIT_FAILURE);
+            errno = 0;
+            continue;
         }
 
-        char filename[MAX_NAME_LENGHT];
-        read(connfd, filename, sizeof(filename));
-        char path[MAX_NAME_LENGHT*2 + 1];
-        snprintf(path, sizeof(path), "%s%s%s", save_dir, 
-            save_dir[strlen(save_dir) - 1] == '/' ? "":"/", filename);
+        pthread_t thread;
+        pthrData thread_data = {
+            thread_data.connfd = connfd,
+            thread_data.save_dir = save_dir
+        };
 
-        FILE *fp = fopen(path, "wb");
-        if (fp != NULL) lockf(fileno(fp), F_TLOCK, 0);
-        snprintf(buffer, sizeof(buffer), "%d", errno);
-        write(connfd, buffer, strlen(buffer) + 1);
-        if (errno == 0) {
-            int count;
-            while((count = read(connfd, buffer, sizeof(buffer))) > 0) {
-                fwrite(buffer, sizeof(char), count, fp);
-                snprintf(buffer, sizeof(buffer), "%d", ferror(fp) == 0 ? errno : EIO);
-                write(connfd, buffer, strlen(buffer) + 1);
-            }
-            lockf(fileno(fp), F_ULOCK, 0);
-        }
-        if (fp != NULL) fclose(fp);
-        close(connfd);
+        pthread_create(&thread, NULL, server_thread, &thread_data);
+        pthread_detach(thread);
     }
 
 }
@@ -91,16 +118,18 @@ void client(const char *address, const int port, const char *filename, const cha
     struct stat st;
     stat(filename, &st); 
 
-    int sockfd;
-    if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    const int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
         perror("Could not create socket");
         exit(EXIT_FAILURE);
     }
-    
-    if (inet_aton(address, &serv_addr.sin_addr) <= 0) {
-        perror("inet_aton error occured");
+
+    struct hostent *h = gethostbyname(address);
+    if (h == NULL) {
+        herror("gethostbyname error occured");
         exit(EXIT_FAILURE);
     }
+    serv_addr.sin_addr = *((struct in_addr *) h->h_addr);
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
 
@@ -108,6 +137,8 @@ void client(const char *address, const int port, const char *filename, const cha
         perror("Connect Failed");
         exit(EXIT_FAILURE);
     }
+
+    char buffer[BUFFER_SIZE];
 
     write(sockfd, server_filename, sizeof(server_filename));
     read(sockfd, buffer, sizeof(buffer));
@@ -144,10 +175,10 @@ void client(const char *address, const int port, const char *filename, const cha
     fclose(fp);
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[]){
     int opt;
     bool is_server = false;
-    char address[MAX_NAME_LENGHT] = "127.0.0.1";
+    char address[MAX_NAME_LENGHT] = "localhost";
     int port = 5000;
     char save_dir[MAX_NAME_LENGHT] = "save_dir";
     char server_filename[MAX_NAME_LENGHT] = "file";
@@ -162,13 +193,13 @@ int main(int argc, char *argv[]) {
                     port = atoi(optarg);
                     break;
             case 'a':
-                    strncpy(address, optarg, sizeof(optarg));
+                    strncpy(address, optarg, strlen(optarg));
                     break;
             case 'd':
-                    strncpy(save_dir, optarg, sizeof(optarg));
+                    strncpy(save_dir, optarg, strlen(optarg));
                     break;
             case 'n':
-                    strncpy(server_filename, optarg, sizeof(optarg));
+                    strncpy(server_filename, optarg, strlen(optarg));
                     is_server_filename_set = true;
                     break;
             default:
@@ -182,7 +213,7 @@ int main(int argc, char *argv[]) {
         server(port, save_dir);
     } else {
         if (optind >= argc) {
-            perror("Expected filename argument after options");
+            fprintf(stderr, "Expected filename argument after options\n");
             exit(EXIT_FAILURE);
         }
         client(address, port, argv[optind], 
